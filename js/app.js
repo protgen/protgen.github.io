@@ -1180,6 +1180,16 @@ function renderLogitsPanel() {
             renderLogitsPanel();
         });
     });
+
+    // Wire per-row "Add to canvas" buttons — must not bubble into row click
+    panelContent.querySelectorAll('.btn-add-logit-to-canvas').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const tokenIdx = parseInt(btn.dataset.tokenIdx);
+            const value = parseFloat(btn.dataset.value);
+            addLogitNodeToCanvas(currentLogitsPos, tokenIdx, value);
+        });
+    });
 }
 
 function renderLogitsRankedTab(ranked, pos) {
@@ -1194,7 +1204,7 @@ function renderLogitsRankedTab(ranked, pos) {
         &middot; <em>click a row to see incoming edges</em>
     </div>`;
     html += '<table class="logit-table"><thead><tr>' +
-            '<th>Rank</th><th>Token</th><th>Idx</th><th>Logit</th><th></th>' +
+            '<th>Rank</th><th>Token</th><th>Idx</th><th>Logit</th><th></th><th></th>' +
             '</tr></thead><tbody>';
     for (let r = 0; r < ranked.length; r++) {
         const { idx, value } = ranked[r];
@@ -1210,6 +1220,9 @@ function renderLogitsRankedTab(ranked, pos) {
                 <div class="logit-bar-track">
                     <div class="logit-bar-fill" style="width: ${barPct.toFixed(1)}%; background: ${color};"></div>
                 </div>
+            </td>
+            <td class="logit-add-cell">
+                <button class="btn-add-logit-to-canvas" data-token-idx="${idx}" data-value="${value}">Add to canvas</button>
             </td>
         </tr>`;
     }
@@ -2237,6 +2250,14 @@ function addNodeToCanvas(latentIdx, layer, pos, aa, value, isSuper = false, chil
     return node;
 }
 
+// Add a logit (output-vocab) node to the canvas. The "logit layer" index matches
+// the convention used by virtual_weights.json (numLayers, e.g. 10), so the
+// existing checkAndCreateVirtualEdges lookup picks up latent→logit edges.
+function addLogitNodeToCanvas(pos, tokenIdx, value) {
+    const logitLayer = Object.keys(activationData).length;
+    return addNodeToCanvas(tokenIdx, logitLayer, pos, vocabToken(tokenIdx), value);
+}
+
 // Find a canvas node by layer and latentIdx (feature)
 function findCanvasNode(layer, latentIdx) {
     return canvasNodes.find(n =>
@@ -2325,8 +2346,12 @@ function renderNode(node) {
             <div class="node-info">Super Node (${node.children.length} items)</div>
         `;
     } else {
+        const isLogit = analysisType === 'CLM' && node.layer === Object.keys(activationData).length;
+        const label = isLogit
+            ? `lgt/${escapeHtml(vocabToken(node.latentIdx))}`
+            : `L${node.layer + 1}/${node.latentIdx + 1}`;
         div.innerHTML = `
-            <div class="node-latent">L${node.layer + 1}/${node.latentIdx + 1}</div>
+            <div class="node-latent">${label}</div>
             ${node.name ? `<div class="node-name">${node.name}</div>` : ''}
         `;
     }
