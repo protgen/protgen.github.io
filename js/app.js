@@ -47,7 +47,7 @@ let uploadedFiles = {
     topActivations: null,
     virtualWeights: null  // Optional
 };
-let dropzoneAnalysis = 'zero-shot';  // 'zero-shot' | 'CLM' for the dropzone
+let dropzoneAnalysis = 'zero-shot';  // 'zero-shot' | 'CLM' | 'GLM' for the dropzone
 
 // Upload screen elements
 const uploadScreen = document.getElementById('upload-screen');
@@ -554,8 +554,8 @@ function resetDropzoneStatuses() {
 }
 
 function applyDropzoneAnalysis() {
-    // Show seq.txt for zero-shot; show generation.fasta + logits.npy for CLM.
-    if (dropzoneAnalysis === 'CLM') {
+    // Show seq.txt for zero-shot; show generation.fasta + logits.npy for CLM/GLM.
+    if (dropzoneAnalysis === 'CLM' || dropzoneAnalysis === 'GLM') {
         if (statusSeq) statusSeq.style.display = 'none';
         if (statusFasta) statusFasta.style.display = '';
         if (statusLogits) statusLogits.style.display = '';
@@ -670,7 +670,7 @@ function handleFiles(files) {
 function updateLoadButton() {
     const baseLoaded = uploadedFiles.activationIndices && uploadedFiles.topActivations;
     let modeLoaded;
-    if (dropzoneAnalysis === 'CLM') {
+    if (dropzoneAnalysis === 'CLM' || dropzoneAnalysis === 'GLM') {
         modeLoaded = uploadedFiles.fasta && uploadedFiles.logits;
     } else {
         // virtual_weights kept required for zero-shot to preserve current behaviour
@@ -691,7 +691,9 @@ btnLoad.addEventListener('click', async (e) => {
 
         // Reset app state for fresh load
         resetAppState();
-        analysisType = dropzoneAnalysis;
+        // GLM is functionally identical to CLM downstream; the marker label is
+        // sourced from generation.fasta, so coalesce here to keep one code path.
+        analysisType = (dropzoneAnalysis === 'GLM') ? 'CLM' : dropzoneAnalysis;
 
         // Clear dropdown selection (custom circuit)
         exampleDropdown.value = '';
