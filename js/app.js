@@ -21,9 +21,10 @@ let gridEdgeTooltip = null;  // Tooltip for virtual weight edges
 let analysisType = 'zero-shot';  // 'CLM' | 'zero-shot'
 let logitsData = null;            // Float32Array (rows * cols flat)
 let logitsShape = null;           // [rows, cols]
-let clmStart = 0;                 // position where <CLM> begins in fullSequence
+let clmStart = 0;                 // position where <CLM>/<GLM> begins in fullSequence
 let numGenerated = 0;             // generated.length
 let topLogitsByPos = null;        // Map<pos, [{idx, value}, ...]> length 5
+let markerLabel = '<CLM>';        // actual marker text from generation.fasta — '<CLM>' or '<GLM>'
 
 // ProGen2 BPE vocab (indices 0-33). Indices outside this range render as "<id:N>".
 const PROGEN2_VOCAB = [
@@ -95,10 +96,10 @@ async function loadExamplesCSV() {
         }
 
         // Fetch sequence for each example to build the dropdown label.
-        // CLM examples use generation.fasta; zero-shot uses seq.txt.
+        // CLM/GLM examples use generation.fasta; zero-shot uses seq.txt.
         for (const example of examples) {
             try {
-                if (example.analysis === 'CLM') {
+                if (example.analysis === 'CLM' || example.analysis === 'GLM') {
                     const fastaResp = await fetch(example.path + 'generation.fasta');
                     const fastaText = await fastaResp.text();
                     const fasta = parseGenerationFasta(fastaText);
@@ -154,8 +155,8 @@ function populateAnalysisDropdown() {
     const analyses = [...new Set(examplesData
         .filter(e => e.model === selectedModel)
         .map(e => e.analysis))];
-    // Stable order: zero-shot first, then CLM, then anything else
-    const order = { 'zero-shot': 0, 'CLM': 1 };
+    // Stable order: zero-shot first, then CLM, then GLM, then anything else
+    const order = { 'zero-shot': 0, 'CLM': 1, 'GLM': 2 };
     analyses.sort((a, b) => (order[a] ?? 99) - (order[b] ?? 99) || a.localeCompare(b));
     const prev = analysisDropdown.value;
     analysisDropdown.innerHTML = '';
@@ -218,7 +219,7 @@ async function loadVirtualWeights(path) {
 
 // Parse generation.fasta. Format:
 //   >prompt
-//   <prompt body, may contain "<CLM>" placeholder>
+//   <prompt body, may contain "<CLM>" or "<GLM>" placeholder>
 //   >generated_output
 //   <generated tokens>
 function parseGenerationFasta(text) {
@@ -234,15 +235,17 @@ function parseGenerationFasta(text) {
     }
     const promptWithMarker = promptLines.join('').trim();
     const generated = genLines.join('').trim();
-    const marker = '<CLM>';
-    let clmStart = promptWithMarker.indexOf(marker);
+    // Accept <CLM> or <GLM> — both are treated the same way.
+    const markerMatch = promptWithMarker.match(/<(CLM|GLM)>/);
+    const marker = markerMatch ? markerMatch[0] : '<CLM>';
+    let clmStart = markerMatch ? markerMatch.index : -1;
     if (clmStart === -1) {
         // No marker — treat as a plain prompt with generation appended at the end.
         clmStart = promptWithMarker.length;
     }
     const prompt = promptWithMarker.slice(0, clmStart) + promptWithMarker.slice(clmStart + marker.length);
     const fullSequence = prompt.slice(0, clmStart) + generated + prompt.slice(clmStart);
-    return { promptWithMarker, prompt, generated, clmStart, fullSequence };
+    return { promptWithMarker, prompt, generated, clmStart, fullSequence, marker };
 }
 
 // Parse a NumPy v1.0 .npy file containing a 2D float32 array (dtype='<f4', C-order).
@@ -344,9 +347,9 @@ async function loadExampleData(path) {
         // Reset state
         resetAppState();
 
-        // Determine analysis type from the example record
+        // Determine analysis type from the example record. GLM is treated the same as CLM.
         const example = examplesData.find(e => e.path === path);
-        analysisType = (example && example.analysis === 'CLM') ? 'CLM' : 'zero-shot';
+        analysisType = (example && (example.analysis === 'CLM' || example.analysis === 'GLM')) ? 'CLM' : 'zero-shot';
 
         // Fetch all required files. CLM uses generation.fasta + logits.npy in place of seq.txt.
         let activationsText, sequenceText, topActivationsText, virtualWeightsText, canvasStateText, logitsBuf;
@@ -375,6 +378,7 @@ async function loadExampleData(path) {
             sequence = fasta.fullSequence;
             clmStart = fasta.clmStart;
             numGenerated = fasta.generated.length;
+            markerLabel = fasta.marker;
             const npy = parseNpyFloat32(logitsBuf);
             logitsData = npy.data;
             logitsShape = npy.shape;
@@ -477,6 +481,7 @@ function resetAppState() {
     clmStart = 0;
     numGenerated = 0;
     topLogitsByPos = null;
+    markerLabel = '<CLM>';
 
     // Clear canvas
     const nodesContainer = document.getElementById('nodes-container');
@@ -716,6 +721,7 @@ btnLoad.addEventListener('click', async (e) => {
             sequence = fasta.fullSequence;
             clmStart = fasta.clmStart;
             numGenerated = fasta.generated.length;
+            markerLabel = fasta.marker;
             const npy = parseNpyFloat32(logitsBuf);
             logitsData = npy.data;
             logitsShape = npy.shape;
@@ -893,7 +899,10 @@ function computeColumnWidths() {
     const numLayers = Object.keys(activationData).length;
     for (let layer = 0; layer < numLayers; layer++) {
         for (let pos = 0; pos < numPositions; pos++) {
-            const items = activationData[layer]?.[pos] || [];
+            // activationData is indexed by logical position; collapse generated columns
+            // onto the marker and shift post-marker columns back so each fullSequence
+            // column reads its corresponding logical entry.
+            const items = activationData[layer]?.[logicalPos(pos)] || [];
             maxLatentsPerPos[pos] = Math.max(maxLatentsPerPos[pos], items.length);
         }
     }
@@ -965,7 +974,7 @@ function renderGrid() {
         for (let pos = 0; pos < numPositions; pos++) {
             const cellWidth = Math.max(minCellWidth, maxLatentsPerPos[pos] * boxWidth + cellPaddingAndBorder);
             html += `<div class="grid-cell" data-layer="${layer}" data-pos="${pos}" style="width: ${cellWidth}px; min-width: ${cellWidth}px;">`;
-            const items = activationData[layer]?.[pos] || [];
+            const items = activationData[layer]?.[logicalPos(pos)] || [];
             for (const item of items) {
                 const color = getActivationColor(item.value, min, max);
                 const t = (item.value - min) / (max - min);
@@ -1008,7 +1017,7 @@ function renderSequence() {
         const isGenerated = analysisType === 'CLM' &&
             i >= clmStart && i < clmStart + numGenerated;
         const cls = 'seq-item' + (isGenerated ? ' seq-item-generated' : '');
-        const label = isGenerated ? '&lt;CLM&gt;' : sequence[i];
+        const label = isGenerated ? escapeHtml(markerLabel) : sequence[i];
         html += `<div class="${cls}" data-pos="${i}" style="width: ${width}px; min-width: ${width}px;">
             <span class="seq-aa">${label}</span>
             <span class="seq-pos">${displayPos(i)}</span>
@@ -1069,7 +1078,8 @@ function renderWildTypeCard(layer, latentIdx, clickedPos, clickedValue) {
     let aaHtml = '';
     for (let i = 0; i < sequence.length; i++) {
         const aa = sequence[i];
-        const activation = activations[i] || 0;
+        // activations is keyed by logical pos (matches activationData / activation_indices.json).
+        const activation = activations[logicalPos(i)] || 0;
         const isClicked = i === clickedPos;
 
         if (activation === 0) {
@@ -2886,8 +2896,17 @@ document.addEventListener('keydown', (e) => {
 // Virtual Weights Visualization (Grid-based)
 // ============================================
 
-// Position offset control
-function displayPos(pos) { return pos + 1 + positionOffset; }
+// Position offset control.
+// In CLM/GLM mode the marker is one logical slot but is rendered as N grid columns
+// (one per generated token). logicalPos collapses generated columns onto the marker
+// and shifts post-marker columns back, so positions match activation_indices.json.
+function logicalPos(i) {
+    if (analysisType !== 'CLM' || numGenerated <= 0) return i;
+    if (i < clmStart) return i;
+    if (i < clmStart + numGenerated) return clmStart;
+    return i - (numGenerated - 1);
+}
+function displayPos(pos) { return logicalPos(pos) + 1 + positionOffset; }
 
 const offsetInput = document.getElementById('offset-input');
 offsetInput.addEventListener('input', () => {

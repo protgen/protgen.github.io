@@ -1,3 +1,4 @@
 id,circuit_name,path,model,analysis
 1,"Kinase","examples/progen2/kinase_clm/","ProGen2","CLM"
+2,"Kinase","examples/progen2/kinase_glm/","ProGen2","GLM"
 3,"Kinase","examples/progen2/kinase_zeroshot/","ProGen2","zero-shot"
