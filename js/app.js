@@ -1114,27 +1114,84 @@ function handleLogitClick(e) {
     showLogitsPanel(pos);
 }
 
-// Show every ranked logit for a generated position in the right-side panel
+// State for the logits panel (tabs + token drill-down)
+let currentLogitsPos = null;
+let currentLogitsTab = 'ranked';      // 'ranked' | 'incoming'
+let selectedLogitTokenIdx = null;     // set when user clicks a row in the ranked table
+
+// Show the logits panel for a generated position. Defaults to the "All ranked" tab.
 function showLogitsPanel(pos) {
     const ranked = topLogitsByPos && topLogitsByPos.get(pos);
     if (!ranked || ranked.length === 0) return;
 
-    currentPanelState = null;  // lgt panel has no latent context
+    currentPanelState = null;  // logits panel has no latent context
+    currentLogitsPos = pos;
+    currentLogitsTab = 'ranked';
+    selectedLogitTokenIdx = null;
+
     panelTitle.textContent = `Logits @ position ${displayPos(pos)}`;
 
     // Hide the "Add to Canvas" button if it exists — not meaningful for logits
     const addBtn = document.getElementById('panel-add-to-canvas');
     if (addBtn) addBtn.style.display = 'none';
 
+    renderLogitsPanel();
+    activationPanel.classList.remove('hidden');
+}
+
+// Re-renders #activation-panel-content for the current logits-panel state.
+function renderLogitsPanel() {
+    const pos = currentLogitsPos;
+    const ranked = topLogitsByPos.get(pos);
+
+    let html = '<div class="logit-panel">';
+
+    // Tab bar
+    html += '<div class="logit-tabs">';
+    html += `<button class="logit-tab ${currentLogitsTab === 'ranked' ? 'active' : ''}" data-tab="ranked">All ranked</button>`;
+    if (selectedLogitTokenIdx !== null) {
+        const tok = vocabToken(selectedLogitTokenIdx);
+        html += `<button class="logit-tab ${currentLogitsTab === 'incoming' ? 'active' : ''}" data-tab="incoming">Incoming → ${escapeHtml(tok)}</button>`;
+    }
+    html += '</div>';
+
+    if (currentLogitsTab === 'incoming' && selectedLogitTokenIdx !== null) {
+        html += renderLogitsIncomingTab(pos, selectedLogitTokenIdx);
+    } else {
+        html += renderLogitsRankedTab(ranked, pos);
+    }
+
+    html += '</div>';
+    panelContent.innerHTML = html;
+
+    // Wire tab clicks
+    panelContent.querySelectorAll('.logit-tab').forEach(btn => {
+        btn.addEventListener('click', () => {
+            currentLogitsTab = btn.dataset.tab;
+            renderLogitsPanel();
+        });
+    });
+
+    // Wire row clicks in the ranked table — drill into the incoming-edges tab
+    panelContent.querySelectorAll('tr.logit-row[data-token-idx]').forEach(row => {
+        row.addEventListener('click', () => {
+            selectedLogitTokenIdx = parseInt(row.dataset.tokenIdx);
+            currentLogitsTab = 'incoming';
+            renderLogitsPanel();
+        });
+    });
+}
+
+function renderLogitsRankedTab(ranked, pos) {
     const maxV = ranked[0].value;
     const minV = ranked[ranked.length - 1].value;
     const span = Math.max(1e-9, maxV - minV);
 
-    let html = '<div class="logit-panel">';
-    html += `<div class="logit-panel-context">
+    let html = `<div class="logit-panel-context">
         Position <strong>${displayPos(pos)}</strong>
         &middot; generated token: <strong>${escapeHtml(sequence[pos] ?? '?')}</strong>
         &middot; <span class="logit-count">${ranked.length} ranked</span>
+        &middot; <em>click a row to see incoming edges</em>
     </div>`;
     html += '<table class="logit-table"><thead><tr>' +
             '<th>Rank</th><th>Token</th><th>Idx</th><th>Logit</th><th></th>' +
@@ -1144,7 +1201,7 @@ function showLogitsPanel(pos) {
         const tok = vocabToken(idx);
         const barPct = ((value - minV) / span) * 100;
         const color = getActivationColor(value, minV, maxV);
-        html += `<tr>
+        html += `<tr class="logit-row" data-token-idx="${idx}">
             <td class="logit-rank">${r + 1}</td>
             <td class="logit-token">${escapeHtml(tok)}</td>
             <td class="logit-idx">${idx}</td>
@@ -1156,10 +1213,50 @@ function showLogitsPanel(pos) {
             </td>
         </tr>`;
     }
-    html += '</tbody></table></div>';
-    panelContent.innerHTML = html;
+    html += '</tbody></table>';
+    return html;
+}
 
-    activationPanel.classList.remove('hidden');
+function renderLogitsIncomingTab(pos, tokenIdx) {
+    const tok = vocabToken(tokenIdx);
+    const edges = getIncomingLogitEdges(pos, tokenIdx);
+
+    let html = `<div class="logit-panel-context">
+        Incoming virtual-weight edges to <strong>${escapeHtml(tok)}</strong>
+        @ position <strong>${displayPos(pos)}</strong>
+        &middot; <span class="logit-count">${edges.length} edge${edges.length === 1 ? '' : 's'}</span>
+    </div>`;
+
+    if (edges.length === 0) {
+        html += `<div class="no-data-message">No virtual-weight edges target this token.</div>`;
+        return html;
+    }
+
+    const maxAbs = Math.max(...edges.map(e => Math.abs(e.weight)));
+    const span = Math.max(1e-9, maxAbs);
+
+    html += '<table class="logit-table incoming-edges"><thead><tr>' +
+            '<th>Rank</th><th>Src Pos</th><th>Src Layer</th><th>Src Latent</th><th>Weight</th><th></th>' +
+            '</tr></thead><tbody>';
+    for (let r = 0; r < edges.length; r++) {
+        const e = edges[r];
+        const barPct = (Math.abs(e.weight) / span) * 100;
+        const color = e.weight >= 0 ? '#dc2626' : '#2563eb';  // red positive, blue negative (matches grid edges)
+        html += `<tr>
+            <td class="logit-rank">${r + 1}</td>
+            <td>${displayPos(e.srcPos)}</td>
+            <td>L${e.srcLayer + 1}</td>
+            <td>${e.srcFeature + 1}</td>
+            <td class="logit-value">${e.weight.toFixed(3)}</td>
+            <td class="logit-bar-cell">
+                <div class="logit-bar-track">
+                    <div class="logit-bar-fill" style="width: ${barPct.toFixed(1)}%; background: ${color};"></div>
+                </div>
+            </td>
+        </tr>`;
+    }
+    html += '</tbody></table>';
+    return html;
 }
 
 // Minimal HTML-escape for vocab tokens like "<pad>", "<bos>" that include angle brackets.
@@ -1308,6 +1405,22 @@ function getIncomingEdges(tgtLayer, tgtLatent) {
     incoming.sort((a, b) => Math.abs(b.avgWeight) - Math.abs(a.avgWeight));
 
     return incoming;
+}
+
+// Get virtual-weight edges incoming to a specific (clmPos, lgt-layer, tokenIdx) target.
+// Returns array of { srcPos, srcLayer, srcFeature, weight } sorted by |weight| desc.
+// Operates on the raw virtualWeightsData (positional), not the aggregated map.
+function getIncomingLogitEdges(clmPos, tokenIdx) {
+    if (!virtualWeightsData) return [];
+    const numLayers = Object.keys(activationData).length;
+    const out = [];
+    for (const [srcPos, srcLayer, srcFeature, tgtPos, tgtLayer, tgtFeature, weight] of virtualWeightsData) {
+        if (tgtPos === clmPos && tgtLayer === numLayers && tgtFeature === tokenIdx) {
+            out.push({ srcPos, srcLayer, srcFeature, weight });
+        }
+    }
+    out.sort((a, b) => Math.abs(b.weight) - Math.abs(a.weight));
+    return out;
 }
 
 // Get outgoing edges (influences) from a specific latent to higher layers
@@ -2822,6 +2935,16 @@ edgeThresholdInput.addEventListener('blur', () => {
 
 // Find latent box element in grid by layer, position, and feature
 function findLatentBox(layer, pos, feature) {
+    // lgt layer: target specific token box if it's in the visible top-2,
+    // otherwise fall back to the lgt cell itself.
+    const numLayers = Object.keys(activationData).length;
+    if (analysisType === 'CLM' && layer === numLayers) {
+        const tokenBox = gridBody.querySelector(
+            `.logit-box[data-layer="lgt"][data-pos="${pos}"][data-token-idx="${feature}"]`
+        );
+        if (tokenBox) return tokenBox;
+        return gridBody.querySelector(`.grid-cell[data-layer="lgt"][data-pos="${pos}"]`);
+    }
     const selector = `.latent-box[data-layer="${layer}"][data-pos="${pos}"][data-latent="${feature}"]`;
     return gridBody.querySelector(selector);
 }
@@ -2845,17 +2968,38 @@ function renderVirtualWeightsInGrid() {
 
     if (!virtualWeightsData || virtualWeightsData.length === 0) return;
 
-    // Filter edges based on threshold (top x% by absolute magnitude)
-    let edgesToRender = virtualWeightsData;
-    if (virtualWeightsThreshold < 100) {
-        // Sort by absolute weight magnitude (descending)
-        const sortedEdges = [...virtualWeightsData].sort((a, b) =>
-            Math.abs(b[6]) - Math.abs(a[6])
-        );
-        // Calculate how many edges to keep
-        const numToKeep = Math.ceil(sortedEdges.length * virtualWeightsThreshold / 100);
-        edgesToRender = sortedEdges.slice(0, numToKeep);
+    // Split edges: those targeting the lgt layer get a separate top-5-per-position cap
+    // (real CLM data will have many srcs per logit, so we never want to flood the grid).
+    const numLayers = Object.keys(activationData).length;
+    const lgtEdges = [];
+    const otherEdges = [];
+    for (const e of virtualWeightsData) {
+        if (analysisType === 'CLM' && e[4] === numLayers) lgtEdges.push(e);
+        else otherEdges.push(e);
     }
+
+    // Apply the % threshold to non-lgt edges (existing behaviour)
+    let filteredOther = otherEdges;
+    if (virtualWeightsThreshold < 100 && otherEdges.length) {
+        const sorted = [...otherEdges].sort((a, b) => Math.abs(b[6]) - Math.abs(a[6]));
+        const numToKeep = Math.ceil(sorted.length * virtualWeightsThreshold / 100);
+        filteredOther = sorted.slice(0, numToKeep);
+    }
+
+    // Cap lgt edges at top-5 per <CLM> position by absolute weight
+    const byLgtPos = new Map();
+    for (const e of lgtEdges) {
+        const tgtPos = e[3];
+        if (!byLgtPos.has(tgtPos)) byLgtPos.set(tgtPos, []);
+        byLgtPos.get(tgtPos).push(e);
+    }
+    const cappedLgt = [];
+    for (const arr of byLgtPos.values()) {
+        arr.sort((a, b) => Math.abs(b[6]) - Math.abs(a[6]));
+        cappedLgt.push(...arr.slice(0, 5));
+    }
+
+    const edgesToRender = filteredOther.concat(cappedLgt);
 
     // Find min/max weight for edge thickness scaling (from filtered edges)
     let minWeight = Infinity, maxWeight = -Infinity;
