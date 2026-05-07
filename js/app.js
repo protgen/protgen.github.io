@@ -1456,6 +1456,33 @@ function getIncomingLogitEdges(clmPos, tokenIdx) {
     return out;
 }
 
+// Get virtual-weight edges outgoing from a specific (srcLayer, srcFeature) latent to the
+// logits layer, aggregated per (tgtPos, tgtFeature) across all source positions.
+// Returns array of { tgtPos, tgtFeature, avgWeight, count } sorted by |avgWeight| desc.
+function getOutgoingLogitEdges(srcLayer, srcFeature) {
+    if (!virtualWeightsData) return [];
+    const numLayers = getNumLayers();
+    const map = new Map();
+    for (const [srcPos, sLayer, sFeature, tgtPos, tgtLayer, tgtFeature, weight] of virtualWeightsData) {
+        if (sLayer === srcLayer && sFeature === srcFeature && tgtLayer === numLayers) {
+            const key = `${tgtPos}-${tgtFeature}`;
+            let entry = map.get(key);
+            if (!entry) {
+                entry = { tgtPos, tgtFeature, totalWeight: 0, count: 0 };
+                map.set(key, entry);
+            }
+            entry.totalWeight += weight;
+            entry.count += 1;
+        }
+    }
+    const out = [];
+    for (const e of map.values()) {
+        out.push({ tgtPos: e.tgtPos, tgtFeature: e.tgtFeature, avgWeight: e.totalWeight / e.count, count: e.count });
+    }
+    out.sort((a, b) => Math.abs(b.avgWeight) - Math.abs(a.avgWeight));
+    return out;
+}
+
 // Get outgoing edges (influences) from a specific latent to higher layers
 // Returns array of { tgtLayer, tgtLatent, avgWeight, count } sorted by absolute weight
 function getOutgoingEdges(srcLayer, srcLatent) {
@@ -1687,24 +1714,45 @@ function renderIncomingInfluences(layer, latentIdx) {
 // Render outgoing influences content
 function renderOutgoingInfluences(layer, latentIdx) {
     let html = '';
-    const outgoingEdges = getOutgoingEdges(layer, latentIdx);
-
-    // Determine if this is the last layer
     const numLayers = getNumLayers();
     const isLastLayer = layer === numLayers - 1;
+    const isCLM = analysisType === 'CLM';
+
+    // For CLM/GLM, edges to the logits "layer" (tgtLayer === numLayers) need positional info
+    // (one row per (tgtPos, tgtFeature)), so drop the position-collapsed entries that
+    // getOutgoingEdges returns for them and replace with positional rows.
+    let regularEdges = getOutgoingEdges(layer, latentIdx);
+    let logitRows = [];
+    if (isCLM) {
+        regularEdges = regularEdges.filter(e => e.tgtLayer < numLayers);
+        logitRows = getOutgoingLogitEdges(layer, latentIdx);
+    }
+
+    const allRows = [
+        ...regularEdges.map(e => ({ ...e, isLogit: false })),
+        ...logitRows.map(e => ({
+            tgtLayer: numLayers,
+            tgtPos: e.tgtPos,
+            tgtFeature: e.tgtFeature,
+            avgWeight: e.avgWeight,
+            count: e.count,
+            isLogit: true,
+        })),
+    ];
+    allRows.sort((a, b) => Math.abs(b.avgWeight) - Math.abs(a.avgWeight));
 
     // Header info
     html += `
         <div class="influences-header">
             <div class="influences-summary">
-                <span class="influences-count">${outgoingEdges.length} outgoing connection${outgoingEdges.length !== 1 ? 's' : ''}</span>
+                <span class="influences-count">${allRows.length} outgoing connection${allRows.length !== 1 ? 's' : ''}</span>
                 <span class="influences-target">from Layer ${layer + 1}, Latent ${latentIdx + 1}</span>
             </div>
         </div>
     `;
 
-    if (outgoingEdges.length === 0) {
-        if (isLastLayer) {
+    if (allRows.length === 0) {
+        if (isLastLayer && !isCLM) {
             html += '<div class="no-data-message">This is the final layer - no outgoing influences.</div>';
         } else if (!virtualWeightsData) {
             html += '<div class="no-data-message">Virtual weights data not loaded. Upload virtual_weights.json to see influences.</div>';
@@ -1712,36 +1760,59 @@ function renderOutgoingInfluences(layer, latentIdx) {
             html += '<div class="no-data-message">No outgoing influences found for this latent.</div>';
         }
     } else {
-        // Calculate min/max for color scaling
-        const weights = outgoingEdges.map(e => e.avgWeight);
+        // Calculate min/max for color scaling (across both regular and logit rows)
+        const weights = allRows.map(e => e.avgWeight);
         const minWeight = Math.min(...weights);
         const maxWeight = Math.max(...weights);
 
         html += '<div class="influences-list">';
 
-        outgoingEdges.forEach((edge, index) => {
+        allRows.forEach((edge, index) => {
             const weightSign = edge.avgWeight >= 0 ? 'positive' : 'negative';
             const weightColor = getEdgeColor(edge.avgWeight, minWeight, maxWeight);
 
-            html += `
-                <div class="influence-card"
-                     data-tgt-layer="${edge.tgtLayer}"
-                     data-tgt-latent="${edge.tgtLatent}"
-                     data-direction="outgoing">
-                    <div class="influence-rank">#${index + 1}</div>
-                    <div class="influence-source">
-                        <span class="influence-layer">Layer ${edge.tgtLayer + 1}</span>
-                        <span class="influence-latent">Latent ${edge.tgtLatent + 1}</span>
+            if (edge.isLogit) {
+                const label = `lgt/${escapeHtml(vocabToken(edge.tgtFeature))}${displayPos(edge.tgtPos)}`;
+                html += `
+                    <div class="influence-card"
+                         data-is-logit="1"
+                         data-tgt-pos="${edge.tgtPos}"
+                         data-tgt-token-idx="${edge.tgtFeature}"
+                         data-direction="outgoing">
+                        <div class="influence-rank">#${index + 1}</div>
+                        <div class="influence-source">
+                            <span class="influence-layer">${label}</span>
+                        </div>
+                        <div class="influence-weight ${weightSign}" style="background: ${weightColor}">
+                            ${edge.avgWeight >= 0 ? '+' : ''}${edge.avgWeight.toFixed(4)}
+                        </div>
+                        <div class="influence-meta">
+                            <span class="influence-edge-count">${edge.count} edge${edge.count !== 1 ? 's' : ''}</span>
+                        </div>
+                        <button class="btn-view-source" title="View logits panel">View</button>
                     </div>
-                    <div class="influence-weight ${weightSign}" style="background: ${weightColor}">
-                        ${edge.avgWeight >= 0 ? '+' : ''}${edge.avgWeight.toFixed(4)}
+                `;
+            } else {
+                html += `
+                    <div class="influence-card"
+                         data-tgt-layer="${edge.tgtLayer}"
+                         data-tgt-latent="${edge.tgtLatent}"
+                         data-direction="outgoing">
+                        <div class="influence-rank">#${index + 1}</div>
+                        <div class="influence-source">
+                            <span class="influence-layer">Layer ${edge.tgtLayer + 1}</span>
+                            <span class="influence-latent">Latent ${edge.tgtLatent + 1}</span>
+                        </div>
+                        <div class="influence-weight ${weightSign}" style="background: ${weightColor}">
+                            ${edge.avgWeight >= 0 ? '+' : ''}${edge.avgWeight.toFixed(4)}
+                        </div>
+                        <div class="influence-meta">
+                            <span class="influence-edge-count">${edge.count} edge${edge.count !== 1 ? 's' : ''}</span>
+                        </div>
+                        <button class="btn-view-source" title="View target latent">View</button>
                     </div>
-                    <div class="influence-meta">
-                        <span class="influence-edge-count">${edge.count} edge${edge.count !== 1 ? 's' : ''}</span>
-                    </div>
-                    <button class="btn-view-source" title="View target latent">View</button>
-                </div>
-            `;
+                `;
+            }
         });
 
         html += '</div>';
@@ -1768,6 +1839,11 @@ function attachInfluenceListeners() {
             viewBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
                 const direction = card.dataset.direction;
+
+                if (direction === 'outgoing' && card.dataset.isLogit === '1') {
+                    showLogitsPanel(parseInt(card.dataset.tgtPos));
+                    return;
+                }
 
                 let targetLayer, targetLatent;
                 if (direction === 'outgoing') {
@@ -2368,7 +2444,7 @@ function renderNode(node) {
     } else {
         const isLogit = analysisType === 'CLM' && node.layer === getNumLayers();
         const label = isLogit
-            ? `lgt/${escapeHtml(vocabToken(node.latentIdx))}`
+            ? `lgt/${escapeHtml(vocabToken(node.latentIdx))}${displayPos(node.pos)}`
             : `L${node.layer + 1}/${node.latentIdx + 1}`;
         div.innerHTML = `
             <div class="node-latent">${label}</div>
@@ -2916,7 +2992,13 @@ function logicalPos(i) {
     if (i < clmStart + numGenerated) return clmStart;
     return i - (numGenerated - 1);
 }
-function displayPos(pos) { return logicalPos(pos) + 1 + positionOffset; }
+function displayPos(pos) {
+    if (analysisType === 'CLM' && numGenerated > 0 &&
+        pos >= clmStart && pos < clmStart + numGenerated) {
+        return pos + 1 + positionOffset;
+    }
+    return logicalPos(pos) + 1 + positionOffset;
+}
 
 const offsetInput = document.getElementById('offset-input');
 offsetInput.addEventListener('input', () => {
@@ -3289,11 +3371,14 @@ gridBody.addEventListener('contextmenu', (e) => {
 
     e.preventDefault();
 
-    const layer = parseInt(latentBox.dataset.layer);
+    const isLogit = latentBox.classList.contains('logit-box');
     const pos = parseInt(latentBox.dataset.pos);
-    const latentIdx = parseInt(latentBox.dataset.latent);
     const value = parseFloat(latentBox.dataset.value);
-    const aa = sequence[pos];
+    const layer = isLogit ? getNumLayers() : parseInt(latentBox.dataset.layer);
+    const latentIdx = isLogit
+        ? parseInt(latentBox.dataset.tokenIdx)
+        : parseInt(latentBox.dataset.latent);
+    const aa = isLogit ? vocabToken(latentIdx) : sequence[pos];
 
     contextMenuTarget = latentBox;
     contextMenuTargetType = 'latent-box';
