@@ -1,4 +1,6 @@
 id,circuit_name,path,model,analysis
-1,"Kinase","examples/progen2/kinase_clm/","ProGen2","CLM"
-2,"Kinase","examples/progen2/kinase_glm/","ProGen2","GLM"
-3,"Kinase","examples/progen2/kinase_zeroshot/","ProGen2","zero-shot"
+1,"Kinase (DFG)","examples/progen3-112m/kinase_dfg_clm/","ProGen3-112M","CLM"
+2,"Kinase (HRD)","examples/progen3-112m/kinase_hrd_clm/","ProGen3-112M","CLM"
+3,"GRB2 (wildtype)","examples/progen3-112m/grb2_wildtype_zeroshot/","ProGen3-112M","zero-shot"
+4,"GRB2 (high fitness)","examples/progen3-112m/grb2_highfitness_zeroshot/","ProGen3-112M","zero-shot"
+5,"GRB2 (low fitness)","examples/progen3-112m/grb2_lowfitness_zeroshot/","ProGen3-112M","zero-shot"

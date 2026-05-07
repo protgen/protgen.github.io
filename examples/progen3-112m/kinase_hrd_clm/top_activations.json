@@ -1,5 +1,5 @@
-{"num_layers": 10, 
-  "family": "HRD",
+{
+  "family": "HRD.json",
   "layers": {
     "0": {
       "1387": [
