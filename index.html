@@ -28,29 +28,20 @@
             <div class="dropzone-icon">📁</div>
             <h2>Drop Files Here</h2>
             <p class="dropzone-subtitle">or click to select files</p>
-            <input type="file" id="file-input" multiple accept=".json,.txt,.fasta,.npy" />
-            <div class="dropzone-analysis-chooser">
-                <label><input type="radio" name="dropzone-analysis" value="zero-shot" checked> zero-shot</label>
-                <label><input type="radio" name="dropzone-analysis" value="CLM"> CLM</label>
-                <label><input type="radio" name="dropzone-analysis" value="GLM"> GLM</label>
-            </div>
+            <input type="file" id="file-input" multiple accept=".json,.fasta,.npy" />
             <div class="required-files">
                 <p>Required files:</p>
                 <div class="file-status" id="status-activation">
                     <span class="status-icon">○</span>
                     <span class="file-name">activation_indices.json</span>
                 </div>
-                <div class="file-status" id="status-seq">
-                    <span class="status-icon">○</span>
-                    <span class="file-name">seq.txt</span>
-                </div>
                 <div class="file-status" id="status-fasta">
                     <span class="status-icon">○</span>
                     <span class="file-name">generation.fasta</span>
                 </div>
-                <div class="file-status" id="status-logits">
+                <div class="file-status optional" id="status-logits">
                     <span class="status-icon">○</span>
-                    <span class="file-name">logits.npy</span>
+                    <span class="file-name">logits.npy (optional, CLM/GLM only)</span>
                 </div>
                 <div class="file-status" id="status-top">
                     <span class="status-icon">○</span>
@@ -61,6 +52,7 @@
                     <span class="file-name">virtual_weights.json</span>
                 </div>
             </div>
+            <div id="detected-analysis" class="hidden">Detected: <span id="detected-type"></span></div>
             <button id="btn-load" disabled><i data-lucide="upload"></i> Load Data</button>
         </div>
     </div>

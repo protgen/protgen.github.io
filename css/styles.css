@@ -499,20 +499,16 @@ tr.logit-row:hover { background: rgba(0, 136, 170, 0.08); }
     transform: scale(1.04);
 }
 
-/* Dropzone analysis chooser */
-.dropzone-analysis-chooser {
-    display: flex;
-    gap: 16px;
-    justify-content: center;
-    margin: 12px 0 8px;
-    font-size: 14px;
-    color: #374151;
+/* Dropzone detected analysis indicator */
+#detected-analysis {
+    margin: 8px 0 0;
+    font-size: 13px;
+    color: #6b7280;
+    text-align: center;
 }
-.dropzone-analysis-chooser label {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    cursor: pointer;
+#detected-analysis #detected-type {
+    font-weight: 600;
+    color: #374151;
 }
 
 /* Sequence Bar */

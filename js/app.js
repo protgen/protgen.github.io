@@ -41,13 +41,15 @@ function vocabToken(idx) {
 // File upload state
 let uploadedFiles = {
     activationIndices: null,
-    seq: null,
     fasta: null,
     logits: null,
     topActivations: null,
-    virtualWeights: null  // Optional
+    virtualWeights: null
 };
-let dropzoneAnalysis = 'zero-shot';  // 'zero-shot' | 'CLM' | 'GLM' for the dropzone
+// Analysis type detected from the uploaded generation.fasta. Null until a fasta is dropped.
+let detectedAnalysisType = null;
+// Cached parse of the uploaded generation.fasta so btnLoad doesn't re-read the file.
+let parsedUploadFasta = null;
 
 // Upload screen elements
 const uploadScreen = document.getElementById('upload-screen');
@@ -55,11 +57,12 @@ const dropzone = document.getElementById('dropzone');
 const fileInput = document.getElementById('file-input');
 const btnLoad = document.getElementById('btn-load');
 const statusActivation = document.getElementById('status-activation');
-const statusSeq = document.getElementById('status-seq');
 const statusTop = document.getElementById('status-top');
 const statusVirtual = document.getElementById('status-virtual');
 const statusFasta = document.getElementById('status-fasta');
 const statusLogits = document.getElementById('status-logits');
+const detectedAnalysisEl = document.getElementById('detected-analysis');
+const detectedTypeEl = document.getElementById('detected-type');
 const appContainer = document.getElementById('app');
 
 // Example selector elements
@@ -96,19 +99,13 @@ async function loadExamplesCSV() {
         }
 
         // Fetch sequence for each example to build the dropdown label.
-        // CLM/GLM examples use generation.fasta; zero-shot uses seq.txt.
+        // generation.fasta is the unified sequence source for all analysis types.
         for (const example of examples) {
             try {
-                if (example.analysis === 'CLM' || example.analysis === 'GLM') {
-                    const fastaResp = await fetch(example.path + 'generation.fasta');
-                    const fastaText = await fastaResp.text();
-                    const fasta = parseGenerationFasta(fastaText);
-                    example.sequence = fasta.fullSequence;
-                } else {
-                    const seqResponse = await fetch(example.path + 'seq.txt');
-                    const seqText = await seqResponse.text();
-                    example.sequence = seqText.trim();
-                }
+                const fastaResp = await fetch(example.path + 'generation.fasta');
+                const fastaText = await fastaResp.text();
+                const fasta = parseGenerationFasta(fastaText);
+                example.sequence = fasta.fullSequence;
             } catch (err) {
                 example.sequence = '';
             }
@@ -221,7 +218,9 @@ async function loadVirtualWeights(path) {
 //   >prompt
 //   <prompt body, may contain "<CLM>" or "<GLM>" placeholder>
 //   >generated_output
-//   <generated tokens>
+//   <generated tokens, or a score for zero-shot>
+// Detection rule: <CLM> marker -> 'CLM'; <GLM> marker -> 'GLM'; neither -> 'zero-shot'.
+// For zero-shot the >output section is a score (not residues), so the sequence is the prompt only.
 function parseGenerationFasta(text) {
     const lines = text.split(/\r?\n/);
     let mode = null;
@@ -229,23 +228,31 @@ function parseGenerationFasta(text) {
     const genLines = [];
     for (const line of lines) {
         if (line.startsWith('>prompt')) { mode = 'prompt'; continue; }
-        if (line.startsWith('>generated_output')) { mode = 'gen'; continue; }
+        if (line.startsWith('>generated_output') || line.startsWith('>output')) { mode = 'gen'; continue; }
         if (mode === 'prompt') promptLines.push(line);
         else if (mode === 'gen') genLines.push(line);
     }
     const promptWithMarker = promptLines.join('').trim();
-    const generated = genLines.join('').trim();
-    // Accept <CLM> or <GLM> — both are treated the same way.
+    const rawGenerated = genLines.join('').trim();
     const markerMatch = promptWithMarker.match(/<(CLM|GLM)>/);
-    const marker = markerMatch ? markerMatch[0] : '<CLM>';
-    let clmStart = markerMatch ? markerMatch.index : -1;
-    if (clmStart === -1) {
-        // No marker — treat as a plain prompt with generation appended at the end.
-        clmStart = promptWithMarker.length;
+    if (!markerMatch) {
+        // Zero-shot: prompt is the full sequence; >output is a score, not residues.
+        return {
+            type: 'zero-shot',
+            promptWithMarker,
+            prompt: promptWithMarker,
+            generated: '',
+            clmStart: promptWithMarker.length,
+            fullSequence: promptWithMarker,
+            marker: null
+        };
     }
+    const marker = markerMatch[0];
+    const type = markerMatch[1];  // 'CLM' or 'GLM'
+    const clmStart = markerMatch.index;
     const prompt = promptWithMarker.slice(0, clmStart) + promptWithMarker.slice(clmStart + marker.length);
-    const fullSequence = prompt.slice(0, clmStart) + generated + prompt.slice(clmStart);
-    return { promptWithMarker, prompt, generated, clmStart, fullSequence, marker };
+    const fullSequence = prompt.slice(0, clmStart) + rawGenerated + prompt.slice(clmStart);
+    return { type, promptWithMarker, prompt, generated: rawGenerated, clmStart, fullSequence, marker };
 }
 
 // Parse a NumPy v1.0 .npy file containing a 2D float32 array (dtype='<f4', C-order).
@@ -347,38 +354,36 @@ async function loadExampleData(path) {
         // Reset state
         resetAppState();
 
-        // Determine analysis type from the example record. GLM is treated the same as CLM.
+        // Determine analysis type from the example record. GLM is treated the same as CLM downstream.
         const example = examplesData.find(e => e.path === path);
         analysisType = (example && (example.analysis === 'CLM' || example.analysis === 'GLM')) ? 'CLM' : 'zero-shot';
 
-        // Fetch all required files. CLM uses generation.fasta + logits.npy in place of seq.txt.
-        let activationsText, sequenceText, topActivationsText, virtualWeightsText, canvasStateText, logitsBuf;
+        // generation.fasta is now the unified sequence source for all analysis types.
+        // logits.npy is only fetched for CLM/GLM.
+        let activationsText, fastaText, topActivationsText, virtualWeightsText, canvasStateText, logitsBuf;
+        const baseFetches = [
+            fetch(path + 'activation_indices.json').then(r => r.text()),
+            fetch(path + 'generation.fasta').then(r => r.text()),
+            fetch(path + 'top_activations.json').then(r => r.text()),
+            loadVirtualWeights(path),
+            fetch(path + 'canvas-state.json').then(r => r.ok ? r.text() : null).catch(() => null)
+        ];
         if (analysisType === 'CLM') {
-            [activationsText, sequenceText, topActivationsText, logitsBuf, virtualWeightsText, canvasStateText] = await Promise.all([
-                fetch(path + 'activation_indices.json').then(r => r.text()),
-                fetch(path + 'generation.fasta').then(r => r.text()),
-                fetch(path + 'top_activations.json').then(r => r.text()),
-                fetch(path + 'logits.npy').then(r => r.arrayBuffer()),
-                loadVirtualWeights(path),
-                fetch(path + 'canvas-state.json').then(r => r.ok ? r.text() : null).catch(() => null)
+            [activationsText, fastaText, topActivationsText, virtualWeightsText, canvasStateText, logitsBuf] = await Promise.all([
+                ...baseFetches,
+                fetch(path + 'logits.npy').then(r => r.arrayBuffer())
             ]);
         } else {
-            [activationsText, sequenceText, topActivationsText, virtualWeightsText, canvasStateText] = await Promise.all([
-                fetch(path + 'activation_indices.json').then(r => r.text()),
-                fetch(path + 'seq.txt').then(r => r.text()),
-                fetch(path + 'top_activations.json').then(r => r.text()),
-                loadVirtualWeights(path),
-                fetch(path + 'canvas-state.json').then(r => r.ok ? r.text() : null).catch(() => null)
-            ]);
+            [activationsText, fastaText, topActivationsText, virtualWeightsText, canvasStateText] = await Promise.all(baseFetches);
         }
 
         const activations = JSON.parse(activationsText);
+        const fasta = parseGenerationFasta(fastaText);
+        sequence = fasta.fullSequence;
+        clmStart = fasta.clmStart;
+        numGenerated = fasta.generated.length;
+        markerLabel = fasta.marker || '<CLM>';
         if (analysisType === 'CLM') {
-            const fasta = parseGenerationFasta(sequenceText);
-            sequence = fasta.fullSequence;
-            clmStart = fasta.clmStart;
-            numGenerated = fasta.generated.length;
-            markerLabel = fasta.marker;
             const npy = parseNpyFloat32(logitsBuf);
             logitsData = npy.data;
             logitsShape = npy.shape;
@@ -390,8 +395,6 @@ async function loadExampleData(path) {
                 const vocabRow = fullRow.subarray(0, Math.min(fullRow.length, PROGEN2_VOCAB.length));
                 topLogitsByPos.set(clmStart + i, rankAllLogits(vocabRow));
             }
-        } else {
-            sequence = sequenceText.trim();
         }
         topActivationsData = JSON.parse(topActivationsText);
 
@@ -482,6 +485,9 @@ function resetAppState() {
     numGenerated = 0;
     topLogitsByPos = null;
     markerLabel = '<CLM>';
+    detectedAnalysisType = null;
+    parsedUploadFasta = null;
+    if (detectedAnalysisEl) detectedAnalysisEl.classList.add('hidden');
 
     // Clear canvas
     const nodesContainer = document.getElementById('nodes-container');
@@ -545,7 +551,7 @@ exampleDropdown.addEventListener('change', async (e) => {
 
 // Handle "Load Custom Circuit" button
 function resetDropzoneStatuses() {
-    for (const el of [statusActivation, statusSeq, statusTop, statusVirtual, statusFasta, statusLogits]) {
+    for (const el of [statusActivation, statusTop, statusVirtual, statusFasta, statusLogits]) {
         if (!el) continue;
         el.classList.remove('loaded');
         const icon = el.querySelector('.status-icon');
@@ -553,48 +559,35 @@ function resetDropzoneStatuses() {
     }
 }
 
-function applyDropzoneAnalysis() {
-    // Show seq.txt for zero-shot; show generation.fasta + logits.npy for CLM/GLM.
-    if (dropzoneAnalysis === 'CLM' || dropzoneAnalysis === 'GLM') {
-        if (statusSeq) statusSeq.style.display = 'none';
-        if (statusFasta) statusFasta.style.display = '';
-        if (statusLogits) statusLogits.style.display = '';
-    } else {
-        if (statusSeq) statusSeq.style.display = '';
-        if (statusFasta) statusFasta.style.display = 'none';
-        if (statusLogits) statusLogits.style.display = 'none';
+// Show/hide the "Detected:" indicator based on the analysis type detected from
+// the uploaded generation.fasta. The logits.npy row stays permanently visible
+// (styled .optional) — it's only required by the Load button for CLM/GLM.
+function applyDetectedAnalysis() {
+    if (detectedAnalysisEl && detectedTypeEl) {
+        if (detectedAnalysisType) {
+            detectedTypeEl.textContent = detectedAnalysisType;
+            detectedAnalysisEl.classList.remove('hidden');
+        } else {
+            detectedAnalysisEl.classList.add('hidden');
+        }
     }
     updateLoadButton();
 }
-
-document.querySelectorAll('input[name="dropzone-analysis"]').forEach(radio => {
-    radio.addEventListener('change', (e) => {
-        if (e.target.checked) {
-            dropzoneAnalysis = e.target.value;
-            // Clear file slots when switching modes so stale files don't enable Load Data.
-            uploadedFiles = {
-                activationIndices: null, seq: null, fasta: null, logits: null,
-                topActivations: null, virtualWeights: null
-            };
-            resetDropzoneStatuses();
-            applyDropzoneAnalysis();
-        }
-    });
-});
 
 btnLoadCustom.addEventListener('click', () => {
     // Reset file upload state
     uploadedFiles = {
         activationIndices: null,
-        seq: null,
         fasta: null,
         logits: null,
         topActivations: null,
         virtualWeights: null
     };
+    detectedAnalysisType = null;
+    parsedUploadFasta = null;
 
     resetDropzoneStatuses();
-    applyDropzoneAnalysis();
+    applyDetectedAnalysis();
 
     // Reset button
     btnLoad.textContent = 'Load Data';
@@ -629,7 +622,8 @@ fileInput.addEventListener('change', (e) => {
     handleFiles(e.target.files);
 });
 
-function handleFiles(files) {
+async function handleFiles(files) {
+    let fastaFile = null;
     for (const file of files) {
         const name = file.name.toLowerCase();
 
@@ -639,6 +633,7 @@ function handleFiles(files) {
             statusActivation.querySelector('.status-icon').textContent = '●';
         } else if (name === 'generation.fasta' || name.endsWith('.fasta') || name.includes('generation')) {
             uploadedFiles.fasta = file;
+            fastaFile = file;
             if (statusFasta) {
                 statusFasta.classList.add('loaded');
                 statusFasta.querySelector('.status-icon').textContent = '●';
@@ -649,10 +644,6 @@ function handleFiles(files) {
                 statusLogits.classList.add('loaded');
                 statusLogits.querySelector('.status-icon').textContent = '●';
             }
-        } else if (name === 'seq.txt' || name.includes('seq')) {
-            uploadedFiles.seq = file;
-            statusSeq.classList.add('loaded');
-            statusSeq.querySelector('.status-icon').textContent = '●';
         } else if (name === 'top_activations.json' || name.includes('top_activations') || name.includes('top_activation')) {
             uploadedFiles.topActivations = file;
             statusTop.classList.add('loaded');
@@ -664,19 +655,29 @@ function handleFiles(files) {
         }
     }
 
-    updateLoadButton();
+    if (fastaFile) {
+        try {
+            const text = await fastaFile.text();
+            parsedUploadFasta = parseGenerationFasta(text);
+            detectedAnalysisType = parsedUploadFasta.type;
+        } catch (err) {
+            console.error('Error reading generation.fasta:', err);
+            parsedUploadFasta = null;
+            detectedAnalysisType = null;
+        }
+    }
+
+    applyDetectedAnalysis();
 }
 
 function updateLoadButton() {
-    const baseLoaded = uploadedFiles.activationIndices && uploadedFiles.topActivations;
-    let modeLoaded;
-    if (dropzoneAnalysis === 'CLM' || dropzoneAnalysis === 'GLM') {
-        modeLoaded = uploadedFiles.fasta && uploadedFiles.logits;
-    } else {
-        // virtual_weights kept required for zero-shot to preserve current behaviour
-        modeLoaded = uploadedFiles.seq && uploadedFiles.virtualWeights;
-    }
-    btnLoad.disabled = !(baseLoaded && modeLoaded);
+    const baseLoaded = uploadedFiles.activationIndices
+        && uploadedFiles.fasta
+        && uploadedFiles.topActivations
+        && uploadedFiles.virtualWeights;
+    const causalReady = detectedAnalysisType === 'zero-shot'
+        || ((detectedAnalysisType === 'CLM' || detectedAnalysisType === 'GLM') && uploadedFiles.logits);
+    btnLoad.disabled = !(baseLoaded && detectedAnalysisType && causalReady);
 }
 
 btnLoad.addEventListener('click', async (e) => {
@@ -689,41 +690,34 @@ btnLoad.addEventListener('click', async (e) => {
         btnLoad.disabled = true;
         loadingOverlay.classList.remove('hidden');
 
+        // Snapshot state needed to restore after resetAppState() wipes module globals.
+        const detected = detectedAnalysisType;
+        const fasta = parsedUploadFasta;
+
         // Reset app state for fresh load
         resetAppState();
-        // GLM is functionally identical to CLM downstream; the marker label is
-        // sourced from generation.fasta, so coalesce here to keep one code path.
-        analysisType = (dropzoneAnalysis === 'GLM') ? 'CLM' : dropzoneAnalysis;
+        // GLM is treated identically to CLM downstream; the marker label distinguishes them visually.
+        analysisType = (detected === 'GLM' || detected === 'CLM') ? 'CLM' : 'zero-shot';
 
         // Clear dropdown selection (custom circuit)
         exampleDropdown.value = '';
 
         // Read all required files
-        let activationsText, sequenceText, topActivationsText, virtualWeightsText, logitsBuf;
-        if (analysisType === 'CLM') {
-            [activationsText, sequenceText, topActivationsText, logitsBuf, virtualWeightsText] = await Promise.all([
-                uploadedFiles.activationIndices.text(),
-                uploadedFiles.fasta.text(),
-                uploadedFiles.topActivations.text(),
-                uploadedFiles.logits.arrayBuffer(),
-                uploadedFiles.virtualWeights ? uploadedFiles.virtualWeights.text() : Promise.resolve(null)
-            ]);
-        } else {
-            [activationsText, sequenceText, topActivationsText, virtualWeightsText] = await Promise.all([
-                uploadedFiles.activationIndices.text(),
-                uploadedFiles.seq.text(),
-                uploadedFiles.topActivations.text(),
-                uploadedFiles.virtualWeights.text()
-            ]);
-        }
+        const [activationsText, topActivationsText, virtualWeightsText, logitsBuf] = await Promise.all([
+            uploadedFiles.activationIndices.text(),
+            uploadedFiles.topActivations.text(),
+            uploadedFiles.virtualWeights.text(),
+            (analysisType === 'CLM' && uploadedFiles.logits)
+                ? uploadedFiles.logits.arrayBuffer()
+                : Promise.resolve(null)
+        ]);
 
         const activations = JSON.parse(activationsText);
+        sequence = fasta.fullSequence;
+        clmStart = fasta.clmStart;
+        numGenerated = fasta.generated.length;
+        markerLabel = fasta.marker || '<CLM>';
         if (analysisType === 'CLM') {
-            const fasta = parseGenerationFasta(sequenceText);
-            sequence = fasta.fullSequence;
-            clmStart = fasta.clmStart;
-            numGenerated = fasta.generated.length;
-            markerLabel = fasta.marker;
             const npy = parseNpyFloat32(logitsBuf);
             logitsData = npy.data;
             logitsShape = npy.shape;
@@ -735,8 +729,6 @@ btnLoad.addEventListener('click', async (e) => {
                 const vocabRow = fullRow.subarray(0, Math.min(fullRow.length, PROGEN2_VOCAB.length));
                 topLogitsByPos.set(clmStart + i, rankAllLogits(vocabRow));
             }
-        } else {
-            sequence = sequenceText.trim();
         }
         topActivationsData = JSON.parse(topActivationsText);
 
