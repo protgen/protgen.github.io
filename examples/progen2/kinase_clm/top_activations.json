@@ -1,4 +1,4 @@
-{
+{"num_layers": 10, 
   "family": "HRD",
   "layers": {
     "0": {

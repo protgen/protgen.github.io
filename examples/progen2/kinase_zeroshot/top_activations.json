@@ -1,4 +1,4 @@
-{
+{"num_layers": 10, 
   "family": "GRB2",
   "layers": {
     "0": {

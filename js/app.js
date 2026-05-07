@@ -827,6 +827,22 @@ sequenceBar.addEventListener('scroll', () => {
     isSyncing = false;
 });
 
+// Number of model layers. Authoritative: `num_layers` in top_activations.json.
+// Falls back to max(activationData layer index)+1 for files that pre-date the
+// field — without that fallback, sparse activation data silently under-renders
+// (e.g. kinase_zeroshot has activations only for layers [0,7,8,9] but the
+// model has 10 layers, so layers 7–9 must still render).
+function getNumLayers() {
+    if (topActivationsData && Number.isInteger(topActivationsData.num_layers)) {
+        return topActivationsData.num_layers;
+    }
+    const keys = Object.keys(activationData);
+    if (keys.length === 0) return 0;
+    let max = -1;
+    for (const k of keys) { const n = +k; if (n > max) max = n; }
+    return max + 1;
+}
+
 // Color scale for activation values (light green #b8e994 to teal #079992)
 function getActivationColor(value, minVal, maxVal) {
     const t = Math.max(0, Math.min(1, (value - minVal) / (maxVal - minVal)));
@@ -855,7 +871,7 @@ function getValueRange() {
 
 // Render layer labels dynamically based on loaded data
 function renderLayerLabels() {
-    const numLayers = Object.keys(activationData).length;
+    const numLayers = getNumLayers();
     const layerLabelsContainer = document.getElementById('layer-labels');
     let html = '';
     if (analysisType === 'CLM' && topLogitsByPos) {
@@ -890,7 +906,7 @@ function computeColumnWidths() {
     const numPositions = sequence.length;
     const maxLatentsPerPos = new Array(numPositions).fill(0);
 
-    const numLayers = Object.keys(activationData).length;
+    const numLayers = getNumLayers();
     for (let layer = 0; layer < numLayers; layer++) {
         for (let pos = 0; pos < numPositions; pos++) {
             // activationData is indexed by logical position; collapse generated columns
@@ -923,7 +939,7 @@ function renderGrid() {
     const cellPaddingAndBorder = 21; // 20px padding (10px each side) + 1px border
 
     let html = '';
-    const numLayers = Object.keys(activationData).length;
+    const numLayers = getNumLayers();
 
     // CLM: lgt row at the top, only populated at generated positions.
     if (analysisType === 'CLM' && topLogitsByPos) {
@@ -1429,7 +1445,7 @@ function getIncomingEdges(tgtLayer, tgtLatent) {
 // Operates on the raw virtualWeightsData (positional), not the aggregated map.
 function getIncomingLogitEdges(clmPos, tokenIdx) {
     if (!virtualWeightsData) return [];
-    const numLayers = Object.keys(activationData).length;
+    const numLayers = getNumLayers();
     const out = [];
     for (const [srcPos, srcLayer, srcFeature, tgtPos, tgtLayer, tgtFeature, weight] of virtualWeightsData) {
         if (tgtPos === clmPos && tgtLayer === numLayers && tgtFeature === tokenIdx) {
@@ -1674,7 +1690,7 @@ function renderOutgoingInfluences(layer, latentIdx) {
     const outgoingEdges = getOutgoingEdges(layer, latentIdx);
 
     // Determine if this is the last layer
-    const numLayers = Object.keys(activationData).length;
+    const numLayers = getNumLayers();
     const isLastLayer = layer === numLayers - 1;
 
     // Header info
@@ -2258,7 +2274,7 @@ function addNodeToCanvas(latentIdx, layer, pos, aa, value, isSuper = false, chil
 // the convention used by virtual_weights.json (numLayers, e.g. 10), so the
 // existing checkAndCreateVirtualEdges lookup picks up latent→logit edges.
 function addLogitNodeToCanvas(pos, tokenIdx, value) {
-    const logitLayer = Object.keys(activationData).length;
+    const logitLayer = getNumLayers();
     return addNodeToCanvas(tokenIdx, logitLayer, pos, vocabToken(tokenIdx), value);
 }
 
@@ -2350,7 +2366,7 @@ function renderNode(node) {
             <div class="node-info">Super Node (${node.children.length} items)</div>
         `;
     } else {
-        const isLogit = analysisType === 'CLM' && node.layer === Object.keys(activationData).length;
+        const isLogit = analysisType === 'CLM' && node.layer === getNumLayers();
         const label = isLogit
             ? `lgt/${escapeHtml(vocabToken(node.latentIdx))}`
             : `L${node.layer + 1}/${node.latentIdx + 1}`;
@@ -2975,7 +2991,7 @@ edgeThresholdInput.addEventListener('blur', () => {
 function findLatentBox(layer, pos, feature) {
     // lgt layer: target specific token box if it's in the visible top-2,
     // otherwise fall back to the lgt cell itself.
-    const numLayers = Object.keys(activationData).length;
+    const numLayers = getNumLayers();
     if (analysisType === 'CLM' && layer === numLayers) {
         const tokenBox = gridBody.querySelector(
             `.logit-box[data-layer="lgt"][data-pos="${pos}"][data-token-idx="${feature}"]`
@@ -3008,7 +3024,7 @@ function renderVirtualWeightsInGrid() {
 
     // Split edges: those targeting the lgt layer get a separate top-5-per-position cap
     // (real CLM data will have many srcs per logit, so we never want to flood the grid).
-    const numLayers = Object.keys(activationData).length;
+    const numLayers = getNumLayers();
     const lgtEdges = [];
     const otherEdges = [];
     for (const e of virtualWeightsData) {
